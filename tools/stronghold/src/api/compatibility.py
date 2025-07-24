@@ -1,4 +1,11 @@
-"""Understands compatibility of APIs."""
+"""Understands compatibility of APIs.
+
+Functions or classes may opt-out of backward compatibility checks by
+setting ``_bc_linter_enable`` on the decorated object.  The helper
+``bc_linter.check_compat`` decorator does this automatically, but any
+custom decorator may use ``setattr(obj, "_bc_linter_enable", False)`` to
+disable linting.
+"""
 
 from __future__ import annotations
 
@@ -69,20 +76,17 @@ def check(
     before: pathlib.Path, after: pathlib.Path
 ) -> Sequence[api.violations.Violation]:
     """Identifies API compatibility issues between two files."""
-    before_api = api.ast.extract(before)
-    after_api = api.ast.extract(after)
-
-    before_raw = api.ast.extract_raw(before)
-    after_raw = api.ast.extract_raw(after)
+    before_api, before_raw = api.ast.extract_all(before)
+    after_api, after_raw = api.ast.extract_all(after)
 
     disabled_funcs = {
         name
         for name, node in before_raw.items()
-        if _decorator_disables(node)
+        if _decorator_disables(node, before_raw)
     } | {
         name
         for name, node in after_raw.items()
-        if _decorator_disables(node)
+        if _decorator_disables(node, after_raw)
     }
 
     violations: list[api.violations.Violation] = []
@@ -338,26 +342,52 @@ def _check_type_compatibility(
     return True
 
 
-def _decorator_disables(node: ast.FunctionDef) -> bool:
-    """Returns True if the bc_linter.check_compat decorator disables checks."""
+def _decorator_disables(node: ast.FunctionDef, raw: Mapping[str, ast.FunctionDef]) -> bool:
+    """Returns ``True`` if BC checks are disabled via decorators."""
 
     for deco in node.decorator_list:
         name = _decorator_name(deco)
-        if name != "bc_linter.check_compat":
-            continue
+        if name == "bc_linter.check_compat":
+            enable = True
+            if isinstance(deco, ast.Call):
+                # Look for keyword argument ``enable`` first
+                for kw in deco.keywords:
+                    if kw.arg == "enable" and isinstance(kw.value, ast.Constant):
+                        enable = bool(kw.value.value)
+                        break
+                else:
+                    if len(deco.args) == 1 and isinstance(deco.args[0], ast.Constant):
+                        enable = bool(deco.args[0].value)
 
-        enable = True
-        if isinstance(deco, ast.Call):
-            # Look for keyword argument ``enable`` first
-            for kw in deco.keywords:
-                if kw.arg == "enable" and isinstance(kw.value, ast.Constant):
-                    enable = bool(kw.value.value)
-                    break
-            else:
-                if len(deco.args) == 1 and isinstance(deco.args[0], ast.Constant):
-                    enable = bool(deco.args[0].value)
+            return not enable
 
-        return not enable
+        if name is not None:
+            decorator_node = raw.get(name)
+            if decorator_node is None:
+                continue
+            for stmt in ast.walk(decorator_node):
+                # Look for: setattr(obj, "_bc_linter_enable", <bool>)
+                if isinstance(stmt, ast.Call):
+                    if (
+                        isinstance(stmt.func, ast.Name)
+                        and stmt.func.id == "setattr"
+                        and len(stmt.args) >= 3
+                    ):
+                        attr_arg = stmt.args[1]
+                        value_arg = stmt.args[2]
+                        if (
+                            isinstance(attr_arg, ast.Constant)
+                            and attr_arg.value == "_bc_linter_enable"
+                            and isinstance(value_arg, ast.Constant)
+                        ):
+                            return not bool(value_arg.value)
+
+                # Look for: obj._bc_linter_enable = <bool>
+                if isinstance(stmt, ast.Assign):
+                    if isinstance(stmt.value, ast.Constant):
+                        for target in stmt.targets:
+                            if isinstance(target, ast.Attribute) and target.attr == "_bc_linter_enable":
+                                return not bool(stmt.value.value)
 
     return False
 
