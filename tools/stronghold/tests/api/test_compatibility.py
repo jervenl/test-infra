@@ -537,3 +537,37 @@ def test_check_skip_decorator(tmp_path: pathlib.Path) -> None:
     after = source.make_file(tmp_path, func)
 
     assert api.compatibility.check(before, after) == []
+
+
+def test_check_skip_custom_decorator(tmp_path: pathlib.Path) -> None:
+    before = tmp_path / "before.py"
+    before.write_text(
+        textwrap.dedent(
+            """
+            def toggle(fn):
+                setattr(fn, "_bc_linter_enable", False)
+                return fn
+
+            @toggle
+            def func(x: int) -> None:
+                pass
+            """
+        )
+    )
+
+    after = tmp_path / "after.py"
+    after.write_text(
+        textwrap.dedent(
+            """
+            def toggle(fn):
+                setattr(fn, "_bc_linter_enable", False)
+                return fn
+
+            @toggle
+            def func(x: int, y: int) -> None:
+                pass
+            """
+        )
+    )
+
+    assert api.compatibility.check(before, after) == []
